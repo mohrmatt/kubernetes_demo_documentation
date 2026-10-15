@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    app: shapes-sub
+  name: shapes-sub
+spec:
+  selector:
+    matchLabels:
+      app: shapes-sub
+  template:
+    metadata:
+      labels:
+        app: shapes-sub
+    spec:
+      initContainers:
+      - name: init-user-qos-profiles
+        image: <static repo ip>:5000/shapes_multi_arch
+        command: ["sh", "-c", "if [ ! -f /working/USER_QOS_PROFILES.xml ]; then cp /app/USER_QOS_PROFILES.xml /working/USER_QOS_PROFILES.xml; fi"]
+        volumeMounts:
+        - name: user-qos-profiles
+          mountPath: /working
+      containers:
+      - image: <static repo ip>:5000/shapes_multi_arch
+        name: shapes-sub
+        envFrom:
+        - configMapRef:
+            name: shapes-sub-config
+        command: ["/bin/sh", "-c"]
+        args:
+        - >
+          exec /app/run-shapes.sh subscriber ${SUBSCRIBER_ARGS}
+        imagePullPolicy: Always
+        volumeMounts:
+        - name: user-qos-profiles
+          mountPath: /app/USER_QOS_PROFILES.xml
+          subPath: USER_QOS_PROFILES.xml
+      volumes:
+      - name: user-qos-profiles
+        hostPath:
+          path: /opt/shapes/qos
+          type: DirectoryOrCreate
+      imagePullSecrets:
+      - name: myregistrykey

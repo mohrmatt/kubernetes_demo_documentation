@@ -1,0 +1,19 @@
+network:
+  version: 2
+  renderer: NetworkManager
+  ethernets:
+    eth0:
+      renderer: networkd
+      dhcp4: no
+      dhcp6: no
+      addresses:
+        - 192.168.2.60/24
+      match:
+        macaddress: "08:00:27:e4:62:4f"
+      set-name: eth0
+      # Uncomment and configure if needed:
+      # gateway4: 192.168.2.1
+      # nameservers:
+      #   addresses:
+      #     - 8.8.8.8
+      #     - 8.8.4.4

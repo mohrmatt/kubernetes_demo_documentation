@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<dds  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:noNamespaceSchemaLocation="../../resource/schema/rti_cloud_discovery_service.xsd">
+
+    <configuration_variables>
+        <element>
+            <name>RECEIVE_PORT</name>
+            <value>7400</value>
+        </element>
+    </configuration_variables>
+
+    <!-- 
+    This configuration uses the UDPv4 transport for LAN networks.
+    -->
+    <cloud_discovery_service name="default">
+        <transport>
+            <element>
+                <alias>builtin.udpv4</alias>
+                <receive_port>$(RECEIVE_PORT)</receive_port>
+            </element>
+        </transport>
+    </cloud_discovery_service>
+
+    <!-- 
+    This is configuration uses the Real-Time WAN transport for WAN networks.
+    -->
+    <cloud_discovery_service name="defaultWAN">
+        <transport>
+            <element>
+                <alias>builtin.udpv4_wan</alias>
+                <receive_port>$(RECEIVE_PORT)</receive_port>
+                <property>
+                    <element>
+                        <name>dds.transport.UDPv4_WAN.builtin.parent.message_size_max</name>
+                        <value>1400</value>
+                    </element>
+                </property>
+            </element>
+        </transport>
+    </cloud_discovery_service>
+</dds>

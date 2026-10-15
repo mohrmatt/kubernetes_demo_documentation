@@ -1,0 +1,18 @@
+mirrors:
+  "docker.io":
+    endpoint:
+      - "http://<REGISTRY_IP_ADDRESS>:5000"
+  "ghcr.io":
+    endpoint:
+      - "http://<REGISTRY_IP_ADDRESS>:5000"
+  "registry.k8s.io":
+    endpoint:
+      - "http://<REGISTRY_IP_ADDRESS>:5000"
+  "<REGISTRY_IP_ADDRESS>:5000":
+    endpoint:
+      - "http://<REGISTRY_IP_ADDRESS>:5000"
+
+configs:
+  "<REGISTRY_IP_ADDRESS>:5000":
+    tls:
+      insecure_skip_verify: true

@@ -1,0 +1,12 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: shapes-rs
+spec:
+  template:
+    spec:
+      containers:
+      - name: shapes-rs
+        ports:
+        - containerPort: 7800
+          protocol: UDP

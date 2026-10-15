@@ -1,0 +1,288 @@
+# K3s CNI Path Linker
+# K3s uses non-standard paths for CNI configuration and binaries.
+# This DaemonSet creates symlinks from standard Kubernetes paths to k3s-specific paths,
+# then queries the NetworkAttachmentDefinition via Kubernetes API to detect the macvlan
+# parent interface and enables promiscuous mode on that interface.
+# Standard paths: /etc/cni/net.d and /opt/cni/bin
+# K3s paths: /var/lib/rancher/k3s/agent/etc/cni/net.d and /var/lib/rancher/k3s/data/current/bin
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k3s-cni-path-linker
+  namespace: kube-system
+---
+# Minimal read-only RBAC for querying NetworkAttachmentDefinition/macvlan-config.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k3s-cni-path-linker-nad-reader
+rules:
+  - apiGroups: ["k8s.cni.cncf.io"]
+    resources: ["network-attachment-definitions"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k3s-cni-path-linker-nad-reader
+subjects:
+  - kind: ServiceAccount
+    name: k3s-cni-path-linker
+    namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: k3s-cni-path-linker-nad-reader
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: k3s-cni-path-linker
+  namespace: kube-system
+  labels:
+    app: k3s-cni-path-linker
+spec:
+  selector:
+    matchLabels:
+      app: k3s-cni-path-linker
+  template:
+    metadata:
+      labels:
+        app: k3s-cni-path-linker
+    spec:
+      # Required so the NAD-detection init container can call the Kubernetes API.
+      serviceAccountName: k3s-cni-path-linker
+      # Host network namespace is required so `ip link set ... promisc on` applies to host interfaces.
+      hostNetwork: true
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+      initContainers:
+        # 1) Normalize CNI paths for k3s layout and ensure multus binary symlink exists.
+        - name: link-cni-paths
+          image: busybox:1.36
+          command:
+            - /bin/sh
+          args:
+            - -c
+            - |
+              set -e
+
+              log() {
+                echo "[link-cni-paths] $*"
+              }
+
+              ensure_symlink() {
+                # ensure_symlink <dest_path> <target_path>
+                local dest="$1"
+                local target="$2"
+
+                if [ -L "$dest" ]; then
+                  return
+                fi
+
+                if [ -d "$dest" ] || [ -f "$dest" ]; then
+                  log "Replacing existing path: $dest"
+                  rm -rf "$dest"
+                fi
+
+                ln -s "$target" "$dest"
+                log "Created symlink: $dest -> $target"
+              }
+
+              wait_for_multus() {
+                # Wait until multus binary appears in k3s binary path.
+                local waited=0
+                log "Waiting for multus binary (timeout 300s)..."
+                while [ ! -f /var/lib/rancher/k3s/data/current/bin/multus ]; do
+                  [ "$waited" -ge 300 ] && log "Timeout waiting for multus binary" && exit 1
+                  sleep 2
+                  waited=$((waited + 2))
+                done
+              }
+
+              mkdir -p /host/etc/cni /host/opt/cni /var/lib/rancher/k3s/data/cni
+
+              # Keep existing binaries if present before replacing /host/opt/cni/bin with symlink.
+              if [ -d /host/opt/cni/bin ] && [ "$(ls -A /host/opt/cni/bin 2>/dev/null)" ]; then
+                cp /host/opt/cni/bin/* /var/lib/rancher/k3s/data/current/bin/ 2>/dev/null || true
+              fi
+
+              ensure_symlink /host/opt/cni/bin /var/lib/rancher/k3s/data/current/bin
+
+              # Remove problematic nested multus config.
+              rm -f /host/etc/cni/net.d/00-multus.conflist
+
+              wait_for_multus
+
+              if [ -f /var/lib/rancher/k3s/data/current/bin/multus ]; then
+                # Some k3s/multus installs expect this additional path.
+                ensure_symlink /var/lib/rancher/k3s/data/cni/multus /var/lib/rancher/k3s/data/current/bin/multus
+              fi
+
+              log "Complete"
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: host-etc-cni
+              mountPath: /host/etc/cni
+            - name: host-opt-cni
+              mountPath: /host/opt/cni
+            - name: k3s-cni-conf
+              mountPath: /var/lib/rancher/k3s/agent/etc/cni
+              readOnly: true
+            - name: k3s-cni-bin
+              mountPath: /var/lib/rancher/k3s/data/current/bin
+              readOnly: true
+            - name: k3s-data
+              mountPath: /var/lib/rancher/k3s/data
+        # 2) Query NAD via API to discover the configured macvlan parent interface.
+        - name: configure-macvlan-promisc
+          image: bitnami/kubectl:latest
+          command:
+            - /bin/sh
+          args:
+            - -c
+            - |
+              set -e
+
+              log() {
+                echo "[configure-macvlan-promisc] $*"
+              }
+
+              wait_for_file() {
+                # wait_for_file <path> <timeout_seconds>
+                local path="$1"
+                local timeout="$2"
+                local waited=0
+                while [ ! -f "$path" ]; do
+                  [ "$waited" -ge "$timeout" ] && return 1
+                  sleep 2
+                  waited=$((waited + 2))
+                done
+                return 0
+              }
+
+              wait_for_nad_namespace() {
+                # Find namespace containing macvlan-config NAD (commonly default).
+                local timeout="$1"
+                local waited=0
+                while true; do
+                  NAD_NAMESPACE=$(kubectl get net-attach-def -A --no-headers 2>/dev/null | awk '$2=="macvlan-config"{print $1; exit}')
+                  [ -n "$NAD_NAMESPACE" ] && return 0
+                  [ "$waited" -ge "$timeout" ] && return 1
+                  sleep 2
+                  waited=$((waited + 2))
+                done
+              }
+
+              log "Waiting for multus binary (timeout 300s)..."
+              wait_for_file /var/lib/rancher/k3s/data/current/bin/multus 300 || {
+                log "Timeout waiting for multus binary"
+                exit 1
+              }
+
+              log "Waiting for NetworkAttachmentDefinition/macvlan-config (timeout 300s)..."
+              wait_for_nad_namespace 300 || {
+                log "Timeout waiting for macvlan-config"
+                exit 1
+              }
+
+              NAD_CONFIG=$(kubectl get net-attach-def macvlan-config -n "$NAD_NAMESPACE" -o jsonpath='{.spec.config}')
+              # NAD spec.config is JSON encoded as a string; extract "master" interface.
+              PARENT_IF=$(echo "$NAD_CONFIG" | sed -n 's/.*"master"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr -d '\r' | xargs)
+
+              [ -z "$PARENT_IF" ] && {
+                log "Could not determine macvlan master interface from NAD config"
+                log "NAD config: $NAD_CONFIG"
+                exit 1
+              }
+
+              log "Detected macvlan parent interface: '$PARENT_IF'"
+              # Share detected interface with next init container.
+              echo "$PARENT_IF" > /shared/parent_if
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: k3s-cni-bin
+              mountPath: /var/lib/rancher/k3s/data/current/bin
+              readOnly: true
+            - name: shared-state
+              mountPath: /shared
+        # 3) Enable promiscuous mode on discovered parent interface.
+        - name: enable-macvlan-promisc
+          image: busybox:1.36
+          command:
+            - /bin/sh
+          args:
+            - -c
+            - |
+              set -e
+
+              log() {
+                echo "[enable-macvlan-promisc] $*"
+              }
+
+              [ ! -f /shared/parent_if ] && log "Missing /shared/parent_if from previous init step" && exit 1
+
+              PARENT_IF=$(cat /shared/parent_if | tr -d '\r' | xargs)
+              [ -z "$PARENT_IF" ] && log "Detected interface value is empty" && exit 1
+
+              if ! ip link show "$PARENT_IF" >/dev/null 2>&1; then
+                log "Interface '$PARENT_IF' not found in host network namespace"
+                ip -o link show || true
+                exit 1
+              fi
+
+              ip link set "$PARENT_IF" promisc on
+
+              # Verify via kernel interface flags (IFF_PROMISC bit = 0x100).
+              FLAGS_HEX=$(cat "/sys/class/net/$PARENT_IF/flags" 2>/dev/null)
+              [ -z "$FLAGS_HEX" ] && log "Failed to read interface flags for $PARENT_IF" && exit 1
+
+              FLAGS_DEC=$((16#${FLAGS_HEX#0x}))
+              if [ $((FLAGS_DEC & 0x100)) -ne 0 ]; then
+                log "Promiscuous mode enabled on $PARENT_IF"
+              else
+                log "Failed to verify promiscuous mode on $PARENT_IF (flags=$FLAGS_HEX)"
+                exit 1
+              fi
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: shared-state
+              mountPath: /shared
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.6
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+      volumes:
+        - name: host-etc-cni
+          hostPath:
+            path: /etc/cni
+            type: DirectoryOrCreate
+        - name: host-opt-cni
+          hostPath:
+            path: /opt/cni
+            type: DirectoryOrCreate
+        - name: k3s-cni-conf
+          hostPath:
+            path: /var/lib/rancher/k3s/agent/etc/cni
+            type: Directory
+        - name: k3s-cni-bin
+          hostPath:
+            path: /var/lib/rancher/k3s/data/current/bin
+            type: Directory
+        - name: k3s-data
+          hostPath:
+            path: /var/lib/rancher/k3s/data
+            type: DirectoryOrCreate
+        # Shared file handoff between init containers (stores detected parent interface).
+        - name: shared-state
+          emptyDir: {}

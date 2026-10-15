@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    app: shapes-cds
+  name: shapes-cds
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shapes-cds
+  template:
+    metadata:
+      labels:
+        app: shapes-cds
+        app-type: local
+    spec:
+      nodeSelector:
+        app-type: local
+      initContainers:
+      - name: init-cds-config
+        image: <static repo ip>:5000/cds_latest
+        command: ["sh", "-c", "if [ ! -f /working/RTI_CLOUD_DISCOVERY_SERVICE.xml ]; then cp /app/qos/RTI_CLOUD_DISCOVERY_SERVICE.xml /working/RTI_CLOUD_DISCOVERY_SERVICE.xml; fi"]
+        volumeMounts:
+        - name: cds-config
+          mountPath: /working
+      containers:
+      - image: <static repo ip>:5000/cds_latest
+        name: shapes-cds
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 7400
+          protocol: UDP
+        volumeMounts:
+        - name: cds-config
+          mountPath: /app/qos/RTI_CLOUD_DISCOVERY_SERVICE.xml
+          subPath: RTI_CLOUD_DISCOVERY_SERVICE.xml
+      volumes:
+      - name: cds-config
+        hostPath:
+          path:  /opt/shapes/qos
+          type: DirectoryOrCreate
+      imagePullSecrets:
+      - name: myregistrykey

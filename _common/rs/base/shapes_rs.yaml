@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  creationTimestamp: null
+  labels:
+    app: shapes-rs
+    routing-group: shapes-rs
+  name: shapes-rs
+spec:
+  selector:
+    matchLabels:
+      app: shapes-rs
+  template:
+    metadata:
+      labels:
+        app: shapes-rs
+        routing-group: shapes-rs
+    spec:
+      initContainers:
+      - name: init-routing-service-config
+        image: <static repo ip>:5000/rs_multi_arch
+        command: ["sh", "-c", "if [ ! -f /working/USER_ROUTING_SERVICE.xml ]; then cp /app/qos/USER_ROUTING_SERVICE.xml /working/USER_ROUTING_SERVICE.xml; fi"]
+        volumeMounts:
+        - name: routing-service-config
+          mountPath: /working
+      containers:
+      - image: <static repo ip>:5000/rs_multi_arch
+        name: shapes-rs
+        envFrom:
+        - configMapRef:
+            name: shapes-rs-config
+        command: ["/bin/sh", "-c"]
+        args:
+        - >
+          exec /app/run-routingservice.sh ${ROUTING_SERVICE_ARGS}
+        imagePullPolicy: Always
+        volumeMounts:
+        - name: routing-service-config
+          mountPath: /app/qos/USER_ROUTING_SERVICE.xml
+          subPath: USER_ROUTING_SERVICE.xml
+      volumes:
+      - name: routing-service-config
+        hostPath:
+          path:  /opt/shapes/qos
+          type: DirectoryOrCreate
+      imagePullSecrets:
+      - name: myregistrykey
